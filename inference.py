@@ -14,6 +14,8 @@ _DESCRIPTOR_DIMS = {
     "SIFT": 128, "SUPERPOINT": 256, "XFEAT": 64,
     "SIFT_privacy": 128, "SUPERPOINT_privacy": 256,
     "SIFT_ninjadesc": 128,
+    "ALIKED": 128,
+    "LOMA": 256,
 }
 
 _CONDITION_ALIASES = {
@@ -85,11 +87,14 @@ def load_model(config: dict, condition: str, device: str) -> Representation_Inve
     )
     unet.add_sparse_pixel_graph_encoder()
 
-    ckpt_path = hf_hub_download(
-        repo_id=config["hf_repo"],
-        filename=config["weights_file"],
-        token=token,
-    )
+    if config.get("weights_path"):  # a locally trained checkpoint
+        ckpt_path = config["weights_path"]
+    else:
+        ckpt_path = hf_hub_download(
+            repo_id=config["hf_repo"],
+            filename=config["weights_file"],
+            token=token,
+        )
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     state_dict = ckpt["unet_state_dict"]
     state_dict = _remap_conv_in_keys(state_dict, condition)
