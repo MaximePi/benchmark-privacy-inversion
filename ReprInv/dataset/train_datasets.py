@@ -21,6 +21,8 @@ CONDITION_INPUT_DIMS = {
     "SIFT": 128,
     "SUPERPOINT": 256,
     "XFEAT": 64,
+    "ALIKED": 128,
+    "LOMA": 256,
     "SIFT_ninjadesc": 128,
     "segloc": 3,
     "sam": 3,
@@ -29,7 +31,7 @@ CONDITION_INPUT_DIMS = {
 
 _MAX_SAMPLE_RETRIES = 10
 SEGMENTATION_CONDITIONS = {"segloc", "sam", "adek"}
-MODEL_BACKED_CONDITIONS = {"segloc", "sam", "adek", "SIFT_ninjadesc", "SIFT", "SUPERPOINT", "XFEAT"}
+MODEL_BACKED_CONDITIONS = {"segloc", "sam", "adek", "SIFT_ninjadesc", "SIFT", "SUPERPOINT", "XFEAT", "ALIKED"}
 
 
 def condition_input_dims(conditions) -> list:
@@ -58,7 +60,7 @@ def _fixed_size_positions(positions: torch.Tensor, num_positions: int) -> torch.
 
 class _ConditionExtractor:
     def __init__(self, condition, resolution, downsample_factor, device,
-                 noise_std_dev=0.0, aggregate=False, base_desc="sift", num_positions=2048):
+                 noise_std_dev=0.0, aggregate=False, base_desc="sift", num_positions=2048, loma_features=()):
         self.condition = condition
         self.num_positions = num_positions
         common = dict(resolution=resolution, downsample_factor=downsample_factor)
@@ -73,7 +75,9 @@ class _ConditionExtractor:
             self._ds = NinjadescImageDataset([], condition, aggregate=aggregate, device=device,
                                              base_desc=base_desc, **common)
         else:
-            self._ds = SparseDescriptorImageDataset([], condition, aggregate=aggregate, **common)
+            # ALIKED runs in the training process (dataloader_num_workers=0), so it can use the GPU.
+            self._ds = SparseDescriptorImageDataset([], condition, aggregate=aggregate, aliked_device=device,
+                                                    loma_features=loma_features, **common)
 
         if not self.is_segmentation:
             self._ds.noise_std_dev = noise_std_dev
@@ -83,7 +87,7 @@ class _ConditionExtractor:
     def is_segmentation(self) -> bool:
         return self.condition in SEGMENTATION_CONDITIONS
 
-    def __call__(self, image: Image.Image, training: bool):
+    def __call__(self, image: Image.Image, training: bool, path=None):
         if self.is_segmentation:
             if self.condition == "segloc":
                 seg = self._ds._extract_segloc(image)
@@ -98,7 +102,7 @@ class _ConditionExtractor:
         if self.condition == "SIFT_ninjadesc":
             keypoints, descriptors = self._ds.extract_NINJADESC(image)
         else:
-            keypoints, descriptors = self._ds._extract(image)
+            keypoints, descriptors = self._ds._extract(image, path)
 
         return self._ds.create_conditioning_tensor(keypoints, descriptors, mode="direct", training=training, aggregate=self._ds.aggregate, max_keypoints=self.num_positions)
 
@@ -122,6 +126,7 @@ class ConditionImageDataset(Dataset):
         base_desc: str = "sift",
         max_images: Optional[int] = None,
         num_positions: int = 2048,
+        loma_features=(),
     ):
         conditions = list(conditions)
         if not conditions:
@@ -144,7 +149,7 @@ class ConditionImageDataset(Dataset):
         self._extractor_kwargs = dict(
             resolution=resolution, downsample_factor=downsample_factor, device=device,
             noise_std_dev=noise_std_dev, aggregate=aggregate,
-            base_desc=base_desc, num_positions=num_positions,
+            base_desc=base_desc, num_positions=num_positions, loma_features=loma_features,
         )
         self._extractors = {}
 
@@ -201,7 +206,7 @@ class ConditionImageDataset(Dataset):
         path = self.image_paths[image_idx]
         image = Image.open(path).convert("RGB")
 
-        conditioning_tensor, positions = self._get_extractor(condition)(image, training=self.training)
+        conditioning_tensor, positions = self._get_extractor(condition)(image, training=self.training, path=path)
         positions = _fixed_size_positions(positions, self.num_positions)
         image_ = image.resize((self.resolution, self.resolution), Image.LANCZOS)
 

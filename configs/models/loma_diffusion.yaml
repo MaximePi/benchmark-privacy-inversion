@@ -1,0 +1,21 @@
+name: loma_diffusion
+model_type: diffusion
+
+# LoMa-B (DaD + DeDoDe-G, 256-d; aspect-preserving frame, keypoints scaled into the square), fine-tuned from the released
+# descriptor model; pass the trained weights with --checkpoint.
+default_condition: LOMA
+base_model_name: mpietran/privacy_inversion/submodules/stable-diffusion-2-1
+
+#model params
+lora_rank: 64
+network_alpha: 24
+resolution: 512
+downsample_factor: 8
+
+#dataset params
+aggregate: false
+
+#inference params
+num_inference_steps: 25
+guidance_scale: 1.5
+schedule_type: default

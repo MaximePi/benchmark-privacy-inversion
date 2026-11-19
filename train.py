@@ -52,6 +52,7 @@ def build_datasets(args):
         noise_std_dev=args.noise_std_dev,
         aggregate=args.aggregate,
         num_positions=args.num_positions,
+        loma_features=args.loma_features,
     )
     val_set = ConditionImageDataset(
         args.val_images or args.train_images,
@@ -64,6 +65,7 @@ def build_datasets(args):
         aggregate=args.aggregate,
         max_images=args.num_val_images,
         num_positions=args.num_positions,
+        loma_features=args.loma_val_features or args.loma_features,
     )
     return train_set, val_set
 
@@ -130,6 +132,41 @@ def save_checkpoint(path, epoch, overall_step, unet, optimizer, lr_scheduler, sc
     logging.info(f"Saved checkpoint to {path}")
 
 
+def init_from_checkpoint(unet, path, source_tasks, source_task, rank):
+    """Warm-start new tasks from a trained multi-task model (weights only; fresh optimizer and schedule).
+
+    Every weight whose name and shape match is copied. Per-task weights take the ``source_task`` entry:
+    each task-embedding row and each ``convs_in.<task>``. ``conv_in`` keeps its value: in a checkpoint it
+    is a copy of the last active task's ``convs_in``, and ``switch_lora`` replaces it with the current
+    task's before every forward pass. Any other mismatch is an error, so nothing is left silently at its
+    random initialization.
+    """
+    source = torch.load(path, map_location="cpu", mmap=True, weights_only=False)["unet_state_dict"]
+    row = source_tasks.index(source_task)
+    target = unet.state_dict()
+    state, n_copied, n_remapped = {}, 0, 0
+    for name, value in target.items():
+        if name in source and source[name].shape == value.shape:
+            state[name] = source[name]
+            n_copied += 1
+        elif name.endswith("embedding.weight") and name in source and source[name].shape[0] == len(source_tasks):
+            state[name] = source[name][row : row + 1].expand_as(value).clone()
+            n_remapped += 1
+        elif name.startswith("conv_in."):
+            state[name] = value
+        elif name.startswith("convs_in."):
+            suffix = name.split(".")[-1]
+            state[name] = source[f"convs_in.{source_task}.{suffix}"]
+            if state[name].shape != value.shape:
+                raise ValueError(f"{name}: {tuple(value.shape)} cannot start from {source_task} {tuple(state[name].shape)}")
+            n_remapped += 1
+        else:
+            raise ValueError(f"no initialization for {name} {tuple(value.shape)}")
+    unet.load_state_dict(state, strict=True)
+    if rank == 0:
+        print(f"Initialized from {path}: {n_copied} tensors copied, {n_remapped} per-task tensors from {source_task}")
+
+
 def load_checkpoint(path, unet, optimizer, lr_scheduler, scaler, rank):
     ckpt = torch.load(path, map_location=lambda storage, loc: storage.cuda(rank))
     state_dict = ckpt["unet_state_dict"]
@@ -160,6 +197,8 @@ def train(rank, world_size, args):
         network_alpha=args.network_alpha,
     )
     unet.add_sparse_pixel_graph_encoder()
+    if args.init_from_checkpoint:
+        init_from_checkpoint(unet, args.init_from_checkpoint, args.init_source_tasks, args.init_source_task, rank)
     unet = torch.nn.SyncBatchNorm.convert_sync_batchnorm(unet)
 
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name, subfolder="scheduler")
@@ -277,6 +316,10 @@ def main():
     parser.add_argument("--noise_std_dev", type=float, default=4.0)
     parser.add_argument("--aggregate", action="store_true")
     parser.add_argument("--extractor_device", default="cuda")
+    parser.add_argument("--loma_features", nargs="+", default=[],
+                        help="folders of precomputed LoMa features (one .npz per image stem, with xy and desc) for LOMA training")
+    parser.add_argument("--loma_val_features", nargs="+", default=[],
+                        help="LoMa feature folders of the validation images (default: --loma_features)")
 
     # should not be modified
     parser.add_argument("--resolution", type=int, default=512)
@@ -318,6 +361,12 @@ def main():
     parser.add_argument("--seed", type=int, default=10)
     parser.add_argument("--dataloader_num_workers", type=int, default=0)
     parser.add_argument("--resume_from_checkpoint", default=None)
+    parser.add_argument("--init_from_checkpoint", default=None,
+                        help="warm-start weights (not optimizer) from a trained checkpoint, e.g. the released model")
+    parser.add_argument("--init_source_tasks", nargs="+", default=["SIFT", "SUPERPOINT", "XFEAT"],
+                        help="task order of --init_from_checkpoint (released model: SIFT SUPERPOINT XFEAT)")
+    parser.add_argument("--init_source_task", default="SIFT",
+                        help="source task whose per-task weights initialize the new tasks")
     parser.add_argument("--master_port", type=int, default=12102)
     args = parser.parse_args()
 
